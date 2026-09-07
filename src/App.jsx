@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './supabase';
-import { Calendar, Users, Shield, UserCheck, Plus, CheckCircle } from 'lucide-react';
+import { Calendar, Users, Shield, UserCheck, Plus, CheckCircle, Lock, LogOut } from 'lucide-react';
 
 export default function App() {
   const [tab, setTab] = useState('anotacion');
+  
+  // Estados del formulario de anotación
   const [nombre, setNombre] = useState('');
   const [paso, setPaso] = useState(1);
   const [fecha, setFecha] = useState('');
@@ -12,9 +14,24 @@ export default function App() {
   const [cargando, setCargando] = useState(false);
   const [errorMensaje, setErrorMensaje] = useState(false);
 
+  // Estados de autenticación para Admin
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [emailAdmin, setEmailAdmin] = useState('');
+  const [passwordAdmin, setPasswordAdmin] = useState('');
+  const [errorLogin, setErrorLogin] = useState('');
+  const [cargandoLogin, setCargandoLogin] = useState(false);
+
   useEffect(() => {
     fetchAnotaciones();
+    checkUserSession();
   }, []);
+
+  async function checkUserSession() {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session) {
+      setIsAdmin(true);
+    }
+  }
 
   async function fetchAnotaciones() {
     const { data, error } = await supabase
@@ -44,6 +61,31 @@ export default function App() {
       setErrorMensaje(true);
     }
     setCargando(false);
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setCargandoLogin(true);
+    setErrorLogin('');
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: emailAdmin,
+      password: passwordAdmin,
+    });
+
+    if (error) {
+      setErrorLogin('Credenciales inválidas. Por favor intenta de nuevo.');
+    } else {
+      setIsAdmin(true);
+      setEmailAdmin('');
+      setPasswordAdmin('');
+    }
+    setCargandoLogin(false);
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    setIsAdmin(false);
   }
 
   return (
@@ -81,6 +123,7 @@ export default function App() {
       </nav>
 
       <main className="max-w-2xl mx-auto bg-white rounded-2xl p-6 shadow-sm border border-stone-200">
+        {/* PESTAÑA 1: MI ANOTACIÓN */}
         {tab === 'anotacion' && (
           <div>
             {paso === 1 && (
@@ -161,24 +204,108 @@ export default function App() {
           </div>
         )}
 
+        {/* PESTAÑA 2: CALENDARIO */}
+        {tab === 'calendario' && (
+          <div className="text-center py-8 text-stone-500 space-y-2">
+            <Calendar className="w-12 h-12 mx-auto text-[#2D4030] opacity-80" />
+            <h3 className="font-semibold text-stone-800 text-lg">Próximas Fechas de Servicio</h3>
+            <p className="text-sm">Aquí se listarán las clases y cronogramas programados.</p>
+          </div>
+        )}
+
+        {/* PESTAÑA 3: PADRES */}
+        {tab === 'padres' && (
+          <div className="text-center py-8 text-stone-500 space-y-2">
+            <Users className="w-12 h-12 mx-auto text-[#2D4030] opacity-80" />
+            <h3 className="font-semibold text-stone-800 text-lg">Portal de Familias</h3>
+            <p className="text-sm">Módulo informativo y fichas de niños.</p>
+          </div>
+        )}
+
+        {/* PESTAÑA 4: ADMINISTRACIÓN */}
         {tab === 'admin' && (
           <div>
-            <h2 className="text-lg font-bold text-stone-800 mb-4">Anotaciones registradas</h2>
-            {anotaciones.length === 0 ? (
-              <p className="text-stone-500 text-sm">No hay registros aún.</p>
+            {!isAdmin ? (
+              /* Formularios de Login cuando NO se está autenticado */
+              <form onSubmit={handleLogin} className="space-y-4 max-w-sm mx-auto py-4">
+                <div className="text-center mb-6">
+                  <Lock className="w-10 h-10 text-[#8C4A32] mx-auto mb-2" />
+                  <h2 className="text-xl font-bold text-stone-800">Acceso Administrativo</h2>
+                  <p className="text-xs text-stone-500">Ingresa con tus credenciales de Supabase</p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Correo electrónico</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="admin@raiceskids.org"
+                    value={emailAdmin}
+                    onChange={(e) => setEmailAdmin(e.target.value)}
+                    className="w-full p-3 rounded-xl border border-stone-300 text-sm focus:outline-none focus:ring-2 focus:ring-[#8C4A32]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-700 mb-1">Contraseña</label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="••••••••"
+                    value={passwordAdmin}
+                    onChange={(e) => setPasswordAdmin(e.target.value)}
+                    className="w-full p-3 rounded-xl border border-stone-300 text-sm focus:outline-none focus:ring-2 focus:ring-[#8C4A32]"
+                  />
+                </div>
+
+                {errorLogin && (
+                  <p className="text-xs text-red-600 bg-red-50 p-2.5 rounded-lg border border-red-200 text-center">
+                    {errorLogin}
+                  </p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={cargandoLogin}
+                  className="w-full bg-[#2D4030] text-white p-3 rounded-xl text-sm font-medium hover:bg-[#233226] transition-colors"
+                >
+                  {cargandoLogin ? 'Verificando...' : 'Iniciar Sesión'}
+                </button>
+              </form>
             ) : (
-              <div className="space-y-3">
-                {anotaciones.map((item) => (
-                  <div key={item.id} className="p-3 rounded-xl border border-stone-200 flex justify-between items-center bg-stone-50">
-                    <div>
-                      <p className="font-semibold text-stone-800">{item.nombre}</p>
-                      <p className="text-xs text-stone-500">{item.fecha} · {item.rol}</p>
-                    </div>
-                    <span className="text-xs px-2 py-1 rounded-md bg-amber-100 text-amber-800 font-medium">
-                      {item.estado}
-                    </span>
+              /* Vista del panel administrativo cuando SÍ se inició sesión */
+              <div>
+                <div className="flex justify-between items-center mb-6 pb-4 border-b border-stone-200">
+                  <div>
+                    <h2 className="text-lg font-bold text-stone-800">Panel de Administración</h2>
+                    <p className="text-xs text-stone-500">Registro total de voluntariado</p>
                   </div>
-                ))}
+                  <button
+                    onClick={handleLogout}
+                    className="flex items-center gap-1.5 text-xs text-red-700 bg-red-50 hover:bg-red-100 px-3 py-2 rounded-xl transition-colors"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Cerrar Sesión
+                  </button>
+                </div>
+
+                {anotaciones.length === 0 ? (
+                  <p className="text-stone-500 text-sm text-center py-6">No hay registros almacenados todavía.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {anotaciones.map((item) => (
+                      <div key={item.id} className="p-3.5 rounded-xl border border-stone-200 flex justify-between items-center bg-stone-50">
+                        <div>
+                          <p className="font-semibold text-stone-800 text-sm">{item.nombre}</p>
+                          <p className="text-xs text-stone-500">{item.fecha} · {item.rol}</p>
+                        </div>
+                        <span className="text-xs px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 font-medium capitalize">
+                          {item.estado}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
