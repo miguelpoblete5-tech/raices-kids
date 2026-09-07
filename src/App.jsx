@@ -10,14 +10,13 @@ export default function App() {
   const [rol, setRol] = useState('');
   const [anotaciones, setAnotaciones] = useState([]);
   const [cargando, setCargando] = useState(false);
+  const [errorMensaje, setErrorMensaje] = useState(false);
 
-  // Cargar anotaciones desde Supabase
   useEffect(() => {
     fetchAnotaciones();
   }, []);
 
   async function fetchAnotaciones() {
-    setCargando(true);
     const { data, error } = await supabase
       .from('anotaciones')
       .select('*')
@@ -26,15 +25,14 @@ export default function App() {
     if (!error && data) {
       setAnotaciones(data);
     }
-    setCargando(false);
   }
 
-  // Guardar nueva anotación en Supabase
   async function handleSubmit(e) {
     e.preventDefault();
     if (!nombre || !fecha || !rol) return;
 
     setCargando(true);
+    setErrorMensaje(false);
     const { error } = await supabase
       .from('anotaciones')
       .insert([{ nombre, fecha, rol, estado: 'pendiente' }]);
@@ -43,7 +41,7 @@ export default function App() {
       fetchAnotaciones();
       setPaso(3);
     } else {
-      alert('Error al guardar en la base de datos');
+      setErrorMensaje(true);
     }
     setCargando(false);
   }
@@ -60,7 +58,6 @@ export default function App() {
         <p className="text-stone-600 text-sm">Equipo de servicio · escuela bíblica infantil</p>
       </header>
 
-      {/* Navegación por pestañas */}
       <nav className="max-w-2xl mx-auto flex justify-around border-b border-stone-300 mb-6">
         {[
           { id: 'anotacion', label: 'Mi anotación', icon: UserCheck },
@@ -130,6 +127,13 @@ export default function App() {
                     <option value="Bienvenida">Bienvenida</option>
                   </select>
                 </div>
+
+                {errorMensaje && (
+                  <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-sm">
+                    No pudimos guardar tu anotación en la base de datos. Verifica tu conexión.
+                  </div>
+                )}
+
                 <button
                   type="submit"
                   disabled={cargando}
