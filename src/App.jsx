@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { supabase } from "./supabase";
 import {
   Sprout,
   Users,
@@ -14,17 +15,17 @@ import {
   Plus,
   Heart,
 } from "lucide-react";
- 
+
 /* ---------- constantes ---------- */
- 
-const ADMIN_USER = "Raices";
-const ADMIN_PASS = "Raices.ok";
- 
+
+// Emails que pueden ver el panel de Admin. Agregá o sacá emails acá.
+const ADMIN_EMAILS = ["miguelpoblete5@gmail.com"];
+
 const MESES = [
   "enero", "febrero", "marzo", "abril", "mayo", "junio",
   "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
 ];
- 
+
 const K = {
   volunteers: "raices_volunteers",
   assignments: "raices_assignments",
@@ -32,19 +33,19 @@ const K = {
   config: "raices_config",
   events: "raices_events",
 };
- 
+
 /* ---------- utilidades ---------- */
- 
+
 function currentYearMonth() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
- 
+
 function todayIso() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
- 
+
 function sundaysOfMonth(yyyyMm) {
   const [y, m] = yyyyMm.split("-").map(Number);
   const days = new Date(y, m, 0).getDate();
@@ -57,12 +58,12 @@ function sundaysOfMonth(yyyyMm) {
   }
   return out;
 }
- 
+
 function formatDateLong(iso) {
   const [y, m, d] = iso.split("-").map(Number);
   return `${d} de ${MESES[m - 1]}`;
 }
- 
+
 const FILES_SCHEMA = [
   { key: "estudioMaestro", label: "Estudio del Maestro" },
   { key: "planificacion", label: "Planificación de la clase" },
@@ -72,15 +73,15 @@ const FILES_SCHEMA = [
   { key: "anexo", label: "Anexo" },
   { key: "notaPadres", label: "Nota para papás" },
 ];
- 
+
 function emptyFilesObject() {
   return FILES_SCHEMA.reduce((acc, f) => ({ ...acc, [f.key]: "" }), {});
 }
- 
+
 function defaultMaterial() {
   return { title: "", desc: "", files: emptyFilesObject() };
 }
- 
+
 // Convierte "biper.com/x" en "https://biper.com/x" para que el link abra bien
 // (sin esto, un enlace sin protocolo no navega dentro del artefacto).
 function normalizeUrl(raw) {
@@ -89,7 +90,7 @@ function normalizeUrl(raw) {
   if (/^https?:\/\//i.test(url)) return url;
   return `https://${url}`;
 }
- 
+
 // Abre el link en una pestaña nueva desde un click de botón (más confiable
 // dentro del artefacto que depender de la navegación nativa del <a>).
 function openInNewTab(raw) {
@@ -97,7 +98,7 @@ function openInNewTab(raw) {
   if (!url) return;
   window.open(url, "_blank", "noopener,noreferrer");
 }
- 
+
 function shuffle(arr) {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -106,15 +107,15 @@ function shuffle(arr) {
   }
   return a;
 }
- 
+
 function assignForDate(volunteers, date) {
   const available = volunteers.filter((v) => v.availability.includes(date));
   const maestros = shuffle(available.filter((v) => v.role === "maestro"));
   let asistentes = shuffle(available.filter((v) => v.role === "asistente"));
- 
+
   let peques = [];
   let grandes = [];
- 
+
   if (maestros.length >= 2) {
     peques.push({ id: maestros[0].id, name: maestros[0].name, tag: "maestro" });
     grandes.push({ id: maestros[1].id, name: maestros[1].name, tag: "maestro" });
@@ -124,58 +125,73 @@ function assignForDate(volunteers, date) {
     const target = Math.random() < 0.5 ? peques : grandes;
     target.push({ id: maestros[0].id, name: maestros[0].name, tag: "maestro" });
   }
- 
+
   asistentes.forEach((a) => {
     const dest = peques.length <= grandes.length ? peques : grandes;
     dest.push({ id: a.id, name: a.name, tag: "asistente" });
   });
- 
+
   return { peques, grandes };
 }
- 
-/* ---------- almacenamiento ---------- */
- 
+
+/* ---------- almacenamiento (Supabase) ---------- */
+
 async function loadKey(key, fallback) {
   try {
-    const res = await window.storage.get(key, true);
-    return res ? JSON.parse(res.value) : fallback;
-  } catch {
+    const { data, error } = await supabase
+      .from("app_state")
+      .select("value")
+      .eq("key", key)
+      .maybeSingle();
+    if (error || !data) return fallback;
+    return data.value ?? fallback;
+  } catch (e) {
+    console.error("storage error (load)", e);
     return fallback;
   }
 }
- 
+
 async function saveKey(key, value) {
   try {
-    const res = await window.storage.set(key, JSON.stringify(value), true);
-    return !!res;
+    const { error } = await supabase
+      .from("app_state")
+      .upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) {
+      console.error("storage error (save)", error);
+      return false;
+    }
+    return true;
   } catch (e) {
-    console.error("storage error", e);
+    console.error("storage error (save)", e);
     return false;
   }
 }
- 
-// Guarda y después vuelve a leer para confirmar que quedó realmente persistido.
-// Esto detecta el caso en que window.storage falla silenciosamente (por ejemplo,
-// alguien sin cuenta de Claude con plan pago intentando anotarse).
+
+// Guarda y después vuelve a leer para confirmar que quedó realmente persistido
+// (protege contra cortes de red pasajeros).
 async function saveKeyVerified(key, value) {
   const ok = await saveKey(key, value);
   if (!ok) return false;
   try {
-    const check = await window.storage.get(key, true);
-    if (!check) return false;
-    return JSON.stringify(JSON.parse(check.value)) === JSON.stringify(value);
+    const { data, error } = await supabase
+      .from("app_state")
+      .select("value")
+      .eq("key", key)
+      .maybeSingle();
+    if (error || !data) return false;
+    return JSON.stringify(data.value) === JSON.stringify(value);
   } catch {
     return false;
   }
 }
- 
+
 /* ---------- estilos globales ---------- */
- 
+
 function GlobalStyle() {
   return (
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..700&family=Work+Sans:wght@400;500;600&display=swap');
- 
+
       .rk-root {
         --soil: #26301f;
         --soil-light: #3a4930;
@@ -193,13 +209,13 @@ function GlobalStyle() {
         width: 100%;
       }
       .rk-serif { font-family: 'Fraunces', serif; }
- 
+
       .rk-scroll {
         max-width: 720px;
         margin: 0 auto;
         padding: 28px 20px 60px;
       }
- 
+
       .rk-header {
         display: flex;
         align-items: center;
@@ -215,7 +231,7 @@ function GlobalStyle() {
       }
       .rk-title { font-size: 26px; font-weight: 600; line-height: 1.1; color: var(--soil); }
       .rk-tagline { font-size: 13px; color: var(--soil-light); opacity: 0.8; margin-top: 2px; }
- 
+
       .rk-nav {
         display: flex;
         gap: 6px;
@@ -241,7 +257,7 @@ function GlobalStyle() {
         border-bottom-color: var(--clay);
       }
       .rk-nav button:hover { color: var(--soil); }
- 
+
       .rk-card {
         background: white;
         border-radius: 6px 6px 6px 20px;
@@ -249,9 +265,9 @@ function GlobalStyle() {
         padding: 22px;
         margin-bottom: 16px;
       }
- 
+
       .rk-label { font-size: 12.5px; font-weight: 600; color: var(--soil-light); margin-bottom: 6px; display: block; }
- 
+
       .rk-input {
         width: 100%;
         border: 1.5px solid var(--paper-warm);
@@ -264,7 +280,7 @@ function GlobalStyle() {
         box-sizing: border-box;
       }
       .rk-input:focus { outline: none; border-color: var(--leaf); }
- 
+
       .rk-btn {
         border: none;
         border-radius: 8px;
@@ -287,7 +303,7 @@ function GlobalStyle() {
       .rk-btn-ghost { background: transparent; color: var(--soil); border: 1.5px solid var(--paper-warm); }
       .rk-btn-ghost:hover { border-color: var(--leaf); }
       .rk-btn-danger { background: transparent; color: #a33; border: 1.5px solid #e8d0d0; }
- 
+
       .rk-role-pick {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -307,7 +323,7 @@ function GlobalStyle() {
         background: #f2f6ec;
         color: var(--soil);
       }
- 
+
       .rk-day-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
@@ -328,7 +344,7 @@ function GlobalStyle() {
         border-color: var(--leaf);
         color: white;
       }
- 
+
       .rk-sunday-card {
         border: 1.5px solid var(--paper-warm);
         border-radius: 6px 6px 6px 16px;
@@ -381,7 +397,7 @@ function GlobalStyle() {
       }
       .rk-tag.maestro { background: var(--soil); color: var(--paper); }
       .rk-tag.asistente { background: var(--leaf-light); color: var(--soil); }
- 
+
       .rk-modal-backdrop {
         position: fixed; inset: 0;
         background: rgba(35,41,32,0.55);
@@ -402,18 +418,18 @@ function GlobalStyle() {
         cursor: pointer; color: var(--soil-light);
         background: none; border: none;
       }
- 
+
       .rk-empty {
         text-align: center;
         padding: 30px 16px;
         color: var(--soil-light);
         font-size: 14px;
       }
- 
+
       .rk-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
       .rk-table th { text-align: left; font-size: 11.5px; color: var(--soil-light); padding: 6px 8px; border-bottom: 1.5px solid var(--paper-warm); }
       .rk-table td { padding: 8px; border-bottom: 1px solid var(--paper-warm); vertical-align: top; }
- 
+
       @media (max-width: 480px) {
         .rk-sunday-body { grid-template-columns: 1fr; }
         .rk-group-col { border-right: none; border-bottom: 1px solid var(--paper-warm); }
@@ -421,7 +437,7 @@ function GlobalStyle() {
     `}</style>
   );
 }
- 
+
 /* ---------- iconito raíz ---------- */
 function RootIcon() {
   return (
@@ -432,38 +448,39 @@ function RootIcon() {
     </svg>
   );
 }
- 
+
 /* ---------- app principal ---------- */
- 
+
 export default function RaicesKids() {
   const [tab, setTab] = useState("mi");
   const [loading, setLoading] = useState(true);
- 
+
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+
   const [volunteers, setVolunteers] = useState([]);
   const [assignments, setAssignments] = useState({});
   const [materials, setMaterials] = useState({});
   const [config, setConfig] = useState({ month: currentYearMonth() });
- 
-  const [nameInput, setNameInput] = useState("");
+
+  const [pickName, setPickName] = useState("");
   const [me, setMe] = useState(null); // volunteer object once identificado
-  const [stage, setStage] = useState("ask-name"); // ask-name | register | status
- 
+  const [stage, setStage] = useState("register"); // register | saving | save-failed | status
+
   const [pickRole, setPickRole] = useState(null);
   const [pickDays, setPickDays] = useState([]);
   const [pickEventIds, setPickEventIds] = useState([]);
- 
+
   const [modalInfo, setModalInfo] = useState(null); // {kind:'sunday', date, group} | {kind:'evento', eventId}
- 
-  const [adminAuthed, setAdminAuthed] = useState(false);
-  const [adminUser, setAdminUser] = useState("");
-  const [adminPass, setAdminPass] = useState("");
+
   const [adminError, setAdminError] = useState("");
   const [adminMonthDraft, setAdminMonthDraft] = useState(config.month);
   const [savingMsg, setSavingMsg] = useState("");
   const [materialsDraft, setMaterialsDraft] = useState({});
   const [savedDates, setSavedDates] = useState({}); // {date: true} muestra "Guardado" un instante
   const [events, setEvents] = useState([]);
- 
+
   const loadAll = useCallback(async () => {
     const [v, a, m, c, ev] = await Promise.all([
       loadKey(K.volunteers, []),
@@ -481,44 +498,69 @@ export default function RaicesKids() {
     setEvents(ev);
     setLoading(false);
   }, []);
- 
+
   useEffect(() => {
     loadAll();
   }, [loadAll]);
- 
-  const sundays = sundaysOfMonth(config.month);
- 
-  /* ---- identificación por nombre ---- */
-  function handleLookup(e) {
-    if (e && e.preventDefault) e.preventDefault();
-    const name = nameInput.trim();
-    if (!name) return;
-    const found = volunteers.find((v) => v.name.toLowerCase() === name.toLowerCase());
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  // Una vez logueado, busca si ya existe un anotado con este email.
+  // Si no existe, arranca el formulario de anotación; si existe, muestra su estado.
+  useEffect(() => {
+    if (!session) return;
+    const found = volunteers.find((v) => v.email === session.user.email);
     if (found) {
       setMe(found);
-      setStage("status");
-    } else {
+      setStage((s) => (s === "register" ? "status" : s));
+    } else if (stage !== "saving" && stage !== "save-failed") {
       setMe(null);
-      setPickRole(null);
-      setPickDays([]);
-      setPickEventIds([]);
       setStage("register");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, volunteers]);
+
+  async function signUp(email, password) {
+    setAuthError("");
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error) setAuthError(error.message);
   }
- 
+
+  async function signIn(email, password) {
+    setAuthError("");
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) setAuthError(error.message);
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut();
+  }
+
+  const sundays = sundaysOfMonth(config.month);
+
   function toggleDay(d) {
     setPickDays((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
   }
- 
+
   function toggleEventPick(id) {
     setPickEventIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
- 
+
   async function submitRegistration() {
-    if (!pickRole || pickDays.length === 0) return;
+    if (!session || !pickName.trim() || !pickRole || pickDays.length === 0) return;
     const newVol = {
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      name: nameInput.trim(),
+      email: session.user.email,
+      name: pickName.trim(),
       role: pickRole,
       availability: pickDays,
       eventInterest: pickEventIds,
@@ -527,13 +569,13 @@ export default function RaicesKids() {
     const updated = [...volunteers, newVol];
     setVolunteers(updated);
     setStage("saving");
- 
+
     let ok = await saveKeyVerified(K.volunteers, updated);
     if (!ok) {
       // reintenta una vez más por si fue un problema de red pasajero
       ok = await saveKeyVerified(K.volunteers, updated);
     }
- 
+
     if (ok) {
       setMe(newVol);
       setStage("status");
@@ -542,7 +584,7 @@ export default function RaicesKids() {
       setStage("save-failed");
     }
   }
- 
+
   async function retryRegistration() {
     if (!me) return;
     setStage("saving");
@@ -556,7 +598,7 @@ export default function RaicesKids() {
       setStage("save-failed");
     }
   }
- 
+
   async function addVolunteerManually(name, role, days) {
     if (!name.trim() || !role || days.length === 0) return;
     const newVol = {
@@ -572,32 +614,17 @@ export default function RaicesKids() {
     await saveKey(K.volunteers, updated);
     flashSaved(`${name.trim()} fue agregado/a.`);
   }
- 
+
   /* ---- admin ---- */
-  function tryAdminLogin(e) {
-    if (e && e.preventDefault) e.preventDefault();
-    if (adminUser.trim() === ADMIN_USER && adminPass.trim() === ADMIN_PASS) {
-      setAdminAuthed(true);
-      setAdminError("");
-    } else {
-      setAdminError("Usuario o contraseña incorrectos.");
-    }
-  }
- 
-  function adminLogout() {
-    setAdminAuthed(false);
-    setAdminUser("");
-    setAdminPass("");
-    setAdminError("");
-  }
- 
+  const isAdmin = !!session && ADMIN_EMAILS.includes(session.user.email);
+
   async function saveMonth() {
     const c = { ...config, month: adminMonthDraft };
     setConfig(c);
     await saveKey(K.config, c);
     flashSaved("Mes actualizado.");
   }
- 
+
   async function generateAssignments() {
     const days = sundaysOfMonth(config.month);
     const result = {};
@@ -608,19 +635,19 @@ export default function RaicesKids() {
     await saveKey(K.assignments, result);
     flashSaved("¡Equipos sorteados!");
   }
- 
+
   async function clearAssignments() {
     setAssignments({});
     await saveKey(K.assignments, {});
     flashSaved("Asignaciones borradas.");
   }
- 
+
   async function clearVolunteers() {
     setVolunteers([]);
     await saveKey(K.volunteers, []);
     flashSaved("Anotaciones borradas.");
   }
- 
+
   // Edita el borrador local nomás; todavía no se guarda hasta tocar "Guardar"
   function updateMaterialField(date, group, field, value) {
     const key = `${date}_${group}`;
@@ -633,7 +660,7 @@ export default function RaicesKids() {
       return { ...prev, [key]: updated };
     });
   }
- 
+
   // Guarda los materiales de un domingo puntual (peques + grandes) en el almacenamiento compartido
   async function saveMaterialsForDate(date) {
     setMaterials(materialsDraft);
@@ -641,7 +668,7 @@ export default function RaicesKids() {
     setSavedDates((prev) => ({ ...prev, [date]: true }));
     setTimeout(() => setSavedDates((prev) => ({ ...prev, [date]: false })), 2500);
   }
- 
+
   /* ---- ajuste manual de equipos ---- */
   async function addToAssignment(date, group, volunteerId, tag) {
     const vol = volunteers.find((v) => v.id === volunteerId);
@@ -656,7 +683,7 @@ export default function RaicesKids() {
     await saveKey(K.assignments, updated);
     flashSaved("Equipo actualizado.");
   }
- 
+
   async function removeFromAssignment(date, group, volunteerId) {
     const day = assignments[date] || { peques: [], grandes: [] };
     const updatedDay = { ...day, [group]: day[group].filter((p) => p.id !== volunteerId) };
@@ -665,7 +692,7 @@ export default function RaicesKids() {
     await saveKey(K.assignments, updated);
     flashSaved("Persona quitada del equipo.");
   }
- 
+
   async function changeTagInAssignment(date, group, volunteerId, newTag) {
     const day = assignments[date] || { peques: [], grandes: [] };
     const updatedDay = {
@@ -677,12 +704,12 @@ export default function RaicesKids() {
     await saveKey(K.assignments, updated);
     flashSaved("Etiqueta actualizada.");
   }
- 
+
   function flashSaved(msg) {
     setSavingMsg(msg);
     setTimeout(() => setSavingMsg(""), 2200);
   }
- 
+
   /* ---- eventos especiales ---- */
   async function addEvent(date, title, instructions) {
     if (!date || !title.trim()) return;
@@ -699,20 +726,20 @@ export default function RaicesKids() {
     await saveKey(K.events, updated);
     flashSaved("Evento creado.");
   }
- 
+
   async function updateEvent(id, patch) {
     const updated = events.map((ev) => (ev.id === id ? { ...ev, ...patch } : ev));
     setEvents(updated);
     await saveKey(K.events, updated);
   }
- 
+
   async function deleteEvent(id) {
     const updated = events.filter((ev) => ev.id !== id);
     setEvents(updated);
     await saveKey(K.events, updated);
     flashSaved("Evento borrado.");
   }
- 
+
   async function addToEventTeam(eventId, volunteerId) {
     const vol = volunteers.find((v) => v.id === volunteerId);
     const ev = events.find((e) => e.id === eventId);
@@ -720,14 +747,14 @@ export default function RaicesKids() {
     await updateEvent(eventId, { team: [...ev.team, { id: vol.id, name: vol.name }] });
     flashSaved("Agregado al equipo del evento.");
   }
- 
+
   async function removeFromEventTeam(eventId, volunteerId) {
     const ev = events.find((e) => e.id === eventId);
     if (!ev) return;
     await updateEvent(eventId, { team: ev.team.filter((p) => p.id !== volunteerId) });
     flashSaved("Sacado del equipo del evento.");
   }
- 
+
   async function toggleEventInterest(eventId) {
     if (!me) return;
     const current = me.eventInterest || [];
@@ -738,7 +765,7 @@ export default function RaicesKids() {
     setMe({ ...me, eventInterest: newInterest });
     await saveKey(K.volunteers, updatedVols);
   }
- 
+
   /* ---- helpers de vista ---- */
   function myAssignmentsList() {
     if (!me) return [];
@@ -759,14 +786,14 @@ export default function RaicesKids() {
     });
     return out.sort((a, b) => a.date.localeCompare(b.date));
   }
- 
+
   const upcomingEvents = events.filter((ev) => ev.date >= todayIso()).sort((a, b) => a.date.localeCompare(b.date));
- 
+
   const monthLabel = (() => {
     const [y, m] = config.month.split("-");
     return `${MESES[Number(m) - 1][0].toUpperCase()}${MESES[Number(m) - 1].slice(1)} ${y}`;
   })();
- 
+
   if (loading) {
     return (
       <div className="rk-root">
@@ -777,7 +804,7 @@ export default function RaicesKids() {
       </div>
     );
   }
- 
+
   return (
     <div className="rk-root">
       <GlobalStyle />
@@ -791,7 +818,7 @@ export default function RaicesKids() {
             <div className="rk-tagline">Equipo de servicio · escuela bíblica infantil</div>
           </div>
         </div>
- 
+
         <div className="rk-nav">
           <button className={tab === "mi" ? "active" : ""} onClick={() => setTab("mi")}>
             Mi anotación
@@ -806,14 +833,18 @@ export default function RaicesKids() {
             Admin
           </button>
         </div>
- 
+
         {tab === "mi" && (
           <MiAnotacion
             stage={stage}
-            setStage={setStage}
-            nameInput={nameInput}
-            setNameInput={setNameInput}
-            handleLookup={handleLookup}
+            authLoading={authLoading}
+            session={session}
+            authError={authError}
+            signIn={signIn}
+            signUp={signUp}
+            signOut={signOut}
+            pickName={pickName}
+            setPickName={setPickName}
             pickRole={pickRole}
             setPickRole={setPickRole}
             pickDays={pickDays}
@@ -831,7 +862,7 @@ export default function RaicesKids() {
             toggleEventInterest={toggleEventInterest}
           />
         )}
- 
+
         {tab === "cal" && (
           <Calendario
             sundays={sundays}
@@ -842,23 +873,37 @@ export default function RaicesKids() {
             events={events}
           />
         )}
- 
+
         {tab === "padres" && (
           <PadresSection sundays={sundays} monthLabel={monthLabel} materials={materials} />
         )}
- 
-        {tab === "admin" && !adminAuthed && (
-          <AdminLogin
-            adminUser={adminUser}
-            setAdminUser={setAdminUser}
-            adminPass={adminPass}
-            setAdminPass={setAdminPass}
-            adminError={adminError}
-            tryAdminLogin={tryAdminLogin}
-          />
+
+        {tab === "admin" && authLoading && (
+          <div className="rk-card">
+            <p style={{ fontSize: 14 }}>Verificando sesión…</p>
+          </div>
         )}
- 
-        {tab === "admin" && adminAuthed && (
+
+        {tab === "admin" && !authLoading && !session && (
+          <AdminLogin authError={authError} signIn={signIn} signUp={signUp} />
+        )}
+
+        {tab === "admin" && !authLoading && session && !isAdmin && (
+          <div className="rk-card">
+            <span className="rk-serif" style={{ fontSize: 18, fontWeight: 600 }}>
+              Sin permisos de administrador
+            </span>
+            <p style={{ fontSize: 13.5, marginTop: 8 }}>
+              La cuenta <strong>{session.user.email}</strong> no está autorizada para ver
+              el panel de Admin.
+            </p>
+            <button className="rk-btn rk-btn-ghost" style={{ marginTop: 12, padding: "6px 12px", fontSize: 13 }} onClick={signOut}>
+              Cerrar sesión
+            </button>
+          </div>
+        )}
+
+        {tab === "admin" && !authLoading && session && isAdmin && (
           <AdminPanel
             config={config}
             adminMonthDraft={adminMonthDraft}
@@ -885,12 +930,12 @@ export default function RaicesKids() {
             deleteEvent={deleteEvent}
             addToEventTeam={addToEventTeam}
             removeFromEventTeam={removeFromEventTeam}
-            adminLogout={adminLogout}
+            adminLogout={signOut}
             addVolunteerManually={addVolunteerManually}
           />
         )}
       </div>
- 
+
       {modalInfo && (
         <MaterialModal
           info={modalInfo}
@@ -903,59 +948,129 @@ export default function RaicesKids() {
     </div>
   );
 }
- 
+
+/* ---------- login / registro por email y contraseña (reutilizable) ---------- */
+
+function EmailAuthForm({ authError, signIn, signUp, title }) {
+  const [mode, setMode] = useState("signin"); // signin | signup
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [sending, setSending] = useState(false);
+
+  async function handleSubmit() {
+    if (!email.trim() || !password) return;
+    setSending(true);
+    if (mode === "signin") {
+      await signIn(email.trim(), password);
+    } else {
+      await signUp(email.trim(), password);
+    }
+    setSending(false);
+  }
+
+  return (
+    <div className="rk-card" style={{ maxWidth: 360 }}>
+      {title && (
+        <span className="rk-serif" style={{ fontSize: 18, fontWeight: 600, display: "block", marginBottom: 12 }}>
+          {title}
+        </span>
+      )}
+      <div className="rk-nav" style={{ marginBottom: 16, borderBottom: "2px solid var(--paper-warm)" }}>
+        <button className={mode === "signin" ? "active" : ""} onClick={() => setMode("signin")}>
+          Iniciar sesión
+        </button>
+        <button className={mode === "signup" ? "active" : ""} onClick={() => setMode("signup")}>
+          Crear cuenta
+        </button>
+      </div>
+
+      <span className="rk-label">Email</span>
+      <input
+        className="rk-input"
+        type="email"
+        style={{ marginBottom: 10 }}
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+      />
+      <span className="rk-label">Contraseña</span>
+      <input
+        className="rk-input"
+        type="password"
+        style={{ marginBottom: 14 }}
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") handleSubmit();
+        }}
+      />
+      {authError && <p style={{ color: "#a33", fontSize: 13, marginBottom: 10 }}>{authError}</p>}
+      <button className="rk-btn rk-btn-primary" type="button" onClick={handleSubmit} disabled={sending}>
+        {mode === "signin" ? "Ingresar" : "Crear cuenta"}
+      </button>
+      {mode === "signup" && (
+        <p style={{ fontSize: 12.5, color: "var(--soil-light)", marginTop: 10 }}>
+          Con este email y contraseña vas a poder entrar después para ver tus asignaciones.
+        </p>
+      )}
+    </div>
+  );
+}
+
 /* ---------- tab: mi anotación ---------- */
- 
+
 function MiAnotacion({
-  stage, nameInput, setNameInput, handleLookup, pickRole, setPickRole,
+  stage, authLoading, session, authError, signIn, signUp, signOut,
+  pickName, setPickName, pickRole, setPickRole,
   pickDays, toggleDay, sundays, monthLabel, submitRegistration, retryRegistration, me,
   myAssignments, openModal, upcomingEvents, pickEventIds, toggleEventPick,
   toggleEventInterest,
 }) {
-  if (stage === "ask-name") {
+  if (authLoading) {
     return (
       <div className="rk-card">
-        <span className="rk-label">Tu nombre</span>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            className="rk-input"
-            placeholder="Escribí tu nombre y apellido"
-            value={nameInput}
-            onChange={(e) => setNameInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleLookup(e);
-            }}
-          />
-          <button className="rk-btn rk-btn-primary" type="button" onClick={handleLookup}>
-            Continuar <ChevronRight size={16} />
-          </button>
-        </div>
-        <p style={{ fontSize: 13, color: "var(--soil-light)", marginTop: 10 }}>
-          Si ya te anotaste antes, escribí tu nombre igual que la primera vez para ver tu estado.
-        </p>
+        <p style={{ fontSize: 14 }}>Verificando sesión…</p>
       </div>
     );
   }
- 
+
+  if (!session) {
+    return (
+      <EmailAuthForm
+        authError={authError}
+        signIn={signIn}
+        signUp={signUp}
+        title="Entrá con tu cuenta para anotarte"
+      />
+    );
+  }
+
   if (stage === "register") {
     return (
       <div className="rk-card">
-        <button
-          className="rk-btn rk-btn-ghost"
-          style={{ marginBottom: 16, padding: "6px 12px", fontSize: 13 }}
-          onClick={() => window.location.reload()}
-        >
-          <ArrowLeft size={14} /> Cambiar nombre
-        </button>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <span style={{ fontSize: 12.5, color: "var(--soil-light)" }}>{session.user.email}</span>
+          <button className="rk-btn rk-btn-ghost" style={{ padding: "6px 12px", fontSize: 12.5 }} onClick={signOut}>
+            Cerrar sesión
+          </button>
+        </div>
         <div style={{ marginBottom: 18 }}>
           <span className="rk-serif" style={{ fontSize: 19, fontWeight: 600 }}>
-            Hola, {nameInput.trim()}
+            ¡Hola!
           </span>
           <p style={{ fontSize: 13.5, color: "var(--soil-light)", marginTop: 4 }}>
-            Todavía no estás anotado/a. Elegí tu rol y los domingos de {monthLabel} en los que podés servir.
+            Todavía no estás anotado/a. Completá tus datos y elegí los domingos de {monthLabel} en los que podés servir.
           </p>
         </div>
- 
+
+        <span className="rk-label">Tu nombre</span>
+        <input
+          className="rk-input"
+          placeholder="Nombre y apellido"
+          style={{ marginBottom: 18 }}
+          value={pickName}
+          onChange={(e) => setPickName(e.target.value)}
+        />
+
         <span className="rk-label">Tu rol</span>
         <div className="rk-role-pick" style={{ marginBottom: 18 }}>
           <div
@@ -971,7 +1086,7 @@ function MiAnotacion({
             Asistente
           </div>
         </div>
- 
+
         <span className="rk-label">Domingos disponibles</span>
         <div className="rk-day-grid" style={{ marginBottom: 20 }}>
           {sundays.map((d) => (
@@ -984,7 +1099,7 @@ function MiAnotacion({
             </div>
           ))}
         </div>
- 
+
         {upcomingEvents.length > 0 && (
           <>
             <span className="rk-label">Eventos especiales (opcional)</span>
@@ -1002,10 +1117,10 @@ function MiAnotacion({
             </div>
           </>
         )}
- 
+
         <button
           className="rk-btn rk-btn-accent"
-          disabled={!pickRole || pickDays.length === 0}
+          disabled={!pickName.trim() || !pickRole || pickDays.length === 0}
           onClick={submitRegistration}
         >
           <Check size={16} /> Confirmar anotación
@@ -1013,7 +1128,7 @@ function MiAnotacion({
       </div>
     );
   }
- 
+
   if (stage === "saving") {
     return (
       <div className="rk-card">
@@ -1021,14 +1136,14 @@ function MiAnotacion({
       </div>
     );
   }
- 
+
   if (stage === "save-failed" && me) {
     const resumen =
       `Anotación Raíces Kids\n` +
       `Nombre: ${me.name}\n` +
       `Rol: ${me.role === "maestro" ? "Maestro/a" : "Asistente"}\n` +
       `Disponibilidad: ${me.availability.map((d) => formatDateLong(d)).join(", ")}`;
- 
+
     return (
       <div className="rk-card">
         <span className="rk-serif" style={{ fontSize: 18, fontWeight: 600, color: "var(--clay)" }}>
@@ -1058,11 +1173,17 @@ function MiAnotacion({
       </div>
     );
   }
- 
+
   if (stage === "status" && me) {
     return (
       <div>
         <div className="rk-card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <span style={{ fontSize: 12.5, color: "var(--soil-light)" }}>{session.user.email}</span>
+            <button className="rk-btn rk-btn-ghost" style={{ padding: "6px 12px", fontSize: 12.5 }} onClick={signOut}>
+              Cerrar sesión
+            </button>
+          </div>
           <span className="rk-serif" style={{ fontSize: 19, fontWeight: 600 }}>
             ¡Gracias, {me.name}!
           </span>
@@ -1082,7 +1203,7 @@ function MiAnotacion({
             ))}
           </div>
         </div>
- 
+
         {upcomingEvents.length > 0 && (
           <div className="rk-card">
             <span className="rk-label">Eventos especiales</span>
@@ -1108,7 +1229,7 @@ function MiAnotacion({
             })}
           </div>
         )}
- 
+
         <div className="rk-card">
           <span className="rk-label">Tus asignaciones</span>
           {myAssignments.length === 0 ? (
@@ -1141,20 +1262,20 @@ function MiAnotacion({
       </div>
     );
   }
- 
+
   return null;
 }
- 
+
 /* ---------- tab: calendario público ---------- */
- 
+
 function Calendario({ sundays, monthLabel, assignments, me, openModal, events }) {
   const anyAssigned = Object.keys(assignments).length > 0;
- 
+
   const items = [
     ...sundays.map((d) => ({ kind: "sunday", date: d })),
     ...events.map((ev) => ({ kind: "evento", date: ev.date, event: ev })),
   ].sort((a, b) => a.date.localeCompare(b.date));
- 
+
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
@@ -1163,14 +1284,14 @@ function Calendario({ sundays, monthLabel, assignments, me, openModal, events })
           {monthLabel}
         </span>
       </div>
- 
+
       {!anyAssigned && events.length === 0 && (
         <div className="rk-card rk-empty">
           Los equipos todavía no fueron sorteados. Cuando el director genere la
           asignación, vas a ver acá quién sirve cada domingo.
         </div>
       )}
- 
+
       {items.map((item) => {
         if (item.kind === "sunday") {
           const d = item.date;
@@ -1204,7 +1325,7 @@ function Calendario({ sundays, monthLabel, assignments, me, openModal, events })
             </div>
           );
         }
- 
+
         const ev = item.event;
         return (
           <div key={ev.id} className="rk-sunday-card">
@@ -1245,9 +1366,9 @@ function Calendario({ sundays, monthLabel, assignments, me, openModal, events })
     </div>
   );
 }
- 
+
 /* ---------- modal de material ---------- */
- 
+
 function MaterialModal({ info, materials, assignments, events, close }) {
   if (info.kind === "evento") {
     const ev = events.find((e) => e.id === info.eventId);
@@ -1266,7 +1387,7 @@ function MaterialModal({ info, materials, assignments, events, close }) {
           {ev.instructions && (
             <p style={{ fontSize: 14, marginBottom: 14, whiteSpace: "pre-wrap" }}>{ev.instructions}</p>
           )}
- 
+
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {FILES_SCHEMA.map(({ key: fkey, label }) => {
               const link = ev.files?.[fkey];
@@ -1289,7 +1410,7 @@ function MaterialModal({ info, materials, assignments, events, close }) {
               </p>
             )}
           </div>
- 
+
           <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--paper-warm)" }}>
             <span className="rk-label">Equipo de este evento</span>
             {ev.team.length === 0 && <p style={{ fontSize: 13 }}>Sin asignar todavía.</p>}
@@ -1303,12 +1424,12 @@ function MaterialModal({ info, materials, assignments, events, close }) {
       </div>
     );
   }
- 
+
   const key = `${info.date}_${info.group}`;
   const mat = materials[key];
   const team = assignments[info.date]?.[info.group] || [];
   const hasFiles = mat?.files && Object.values(mat.files).some((v) => v);
- 
+
   return (
     <div className="rk-modal-backdrop" onClick={close}>
       <div className="rk-modal" onClick={(e) => e.stopPropagation()}>
@@ -1322,7 +1443,7 @@ function MaterialModal({ info, materials, assignments, events, close }) {
           {mat?.title || "Material aún no cargado"}
         </div>
         {mat?.desc && <p style={{ fontSize: 14, marginBottom: 14 }}>{mat.desc}</p>}
- 
+
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {FILES_SCHEMA.map(({ key: fkey, label }) => {
             const link = mat?.files?.[fkey];
@@ -1358,9 +1479,9 @@ function MaterialModal({ info, materials, assignments, events, close }) {
     </div>
   );
 }
- 
+
 /* ---------- tab: padres ---------- */
- 
+
 function PadresSection({ sundays, monthLabel, materials }) {
   return (
     <div>
@@ -1405,25 +1526,25 @@ function PadresSection({ sundays, monthLabel, materials }) {
     </div>
   );
 }
- 
+
 /* ---------- admin: alta manual de voluntario ---------- */
- 
+
 function ManualVolunteerForm({ sundays, onAdd }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [days, setDays] = useState([]);
- 
+
   function toggle(d) {
     setDays((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
   }
- 
+
   function handleSubmit() {
     onAdd(name, role, days);
     setName("");
     setRole("");
     setDays([]);
   }
- 
+
   return (
     <div>
       <input
@@ -1458,45 +1579,23 @@ function ManualVolunteerForm({ sundays, onAdd }) {
     </div>
   );
 }
- 
+
 /* ---------- admin: login ---------- */
- 
-function AdminLogin({ adminUser, setAdminUser, adminPass, setAdminPass, adminError, tryAdminLogin }) {
+
+function AdminLogin({ authError, signIn, signUp }) {
   return (
-    <div className="rk-card" style={{ maxWidth: 340 }}>
+    <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
         <Lock size={16} color="var(--soil-light)" />
         <span style={{ fontWeight: 600, fontSize: 15 }}>Acceso del director</span>
       </div>
-      <div>
-        <span className="rk-label">Usuario</span>
-        <input
-          className="rk-input"
-          style={{ marginBottom: 12 }}
-          value={adminUser}
-          onChange={(e) => setAdminUser(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") tryAdminLogin(e); }}
-        />
-        <span className="rk-label">Contraseña</span>
-        <input
-          type="password"
-          className="rk-input"
-          style={{ marginBottom: 14 }}
-          value={adminPass}
-          onChange={(e) => setAdminPass(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") tryAdminLogin(e); }}
-        />
-        {adminError && <p style={{ color: "#a33", fontSize: 13, marginBottom: 10 }}>{adminError}</p>}
-        <button className="rk-btn rk-btn-primary" type="button" onClick={tryAdminLogin}>
-          Ingresar
-        </button>
-      </div>
+      <EmailAuthForm authError={authError} signIn={signIn} signUp={signUp} />
     </div>
   );
 }
- 
+
 /* ---------- admin: panel ---------- */
- 
+
 function AdminPanel({
   config, adminMonthDraft, setAdminMonthDraft, saveMonth, volunteers, sundays,
   monthLabel, generateAssignments, clearAssignments, clearVolunteers, assignments,
@@ -1510,14 +1609,14 @@ function AdminPanel({
   const [newEventDate, setNewEventDate] = useState("");
   const [newEventTitle, setNewEventTitle] = useState("");
   const [newEventInstr, setNewEventInstr] = useState("");
- 
+
   function handleCreateEvent() {
     addEvent(newEventDate, newEventTitle, newEventInstr);
     setNewEventDate("");
     setNewEventTitle("");
     setNewEventInstr("");
   }
- 
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
@@ -1525,13 +1624,13 @@ function AdminPanel({
           Cerrar sesión
         </button>
       </div>
- 
+
       {savingMsg && (
         <div style={{ background: "#f2f6ec", color: "var(--soil)", padding: "8px 14px", borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>
           {savingMsg}
         </div>
       )}
- 
+
       <div className="rk-card">
         <span className="rk-label">Mes de servicio</span>
         <div style={{ display: "flex", gap: 8 }}>
@@ -1550,7 +1649,7 @@ function AdminPanel({
           el equipo se anote.
         </p>
       </div>
- 
+
       <div className="rk-card">
         <span className="rk-label">Agregar voluntario manualmente</span>
         <p style={{ fontSize: 13, color: "var(--soil-light)", marginBottom: 12 }}>
@@ -1559,7 +1658,7 @@ function AdminPanel({
         </p>
         <ManualVolunteerForm sundays={sundays} onAdd={addVolunteerManually} />
       </div>
- 
+
       <div className="rk-card">
         <span className="rk-label">Anotados ({volunteers.length})</span>
         {volunteers.length === 0 ? (
@@ -1608,7 +1707,7 @@ function AdminPanel({
           )
         )}
       </div>
- 
+
       <div className="rk-card">
         <span className="rk-label">Sorteo de equipos</span>
         <p style={{ fontSize: 13.5, marginBottom: 12 }}>
@@ -1639,7 +1738,7 @@ function AdminPanel({
           </div>
         )}
       </div>
- 
+
       <div className="rk-card">
         <span className="rk-label">Ajustar equipos manualmente</span>
         <p style={{ fontSize: 13, color: "var(--soil-light)", marginBottom: 14 }}>
@@ -1658,7 +1757,7 @@ function AdminPanel({
           />
         ))}
       </div>
- 
+
       <div className="rk-card">
         <span className="rk-label">Eventos especiales</span>
         <p style={{ fontSize: 13, color: "var(--soil-light)", marginBottom: 14 }}>
@@ -1694,7 +1793,7 @@ function AdminPanel({
         >
           <Plus size={15} /> Crear evento
         </button>
- 
+
         {events.length === 0 ? (
           <p style={{ fontSize: 13.5, color: "var(--soil-light)", marginTop: 16 }}>
             Todavía no hay eventos especiales cargados.
@@ -1715,7 +1814,7 @@ function AdminPanel({
           </div>
         )}
       </div>
- 
+
       <div className="rk-card">
         <span className="rk-label">Materiales por domingo</span>
         <p style={{ fontSize: 13, color: "var(--soil-light)", marginBottom: 14 }}>
@@ -1737,24 +1836,24 @@ function AdminPanel({
     </div>
   );
 }
- 
+
 /* ---------- admin: ajuste manual de un domingo ---------- */
- 
+
 function ManualAssignRow({ date, day, volunteers, addToAssignment, removeFromAssignment, changeTagInAssignment }) {
   const [open, setOpen] = useState(false);
   const [addGroup, setAddGroup] = useState("peques");
   const [addVolunteerId, setAddVolunteerId] = useState("");
   const [addTag, setAddTag] = useState("asistente");
- 
+
   const assignedIds = new Set([...day.peques.map((p) => p.id), ...day.grandes.map((p) => p.id)]);
   const availableToAdd = volunteers.filter((v) => !assignedIds.has(v.id));
- 
+
   function handleAdd() {
     if (!addVolunteerId) return;
     addToAssignment(date, addGroup, addVolunteerId, addTag);
     setAddVolunteerId("");
   }
- 
+
   return (
     <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid var(--paper-warm)" }}>
       <div
@@ -1766,7 +1865,7 @@ function ManualAssignRow({ date, day, volunteers, addToAssignment, removeFromAss
           {day.peques.length + day.grandes.length} personas · {open ? "cerrar" : "editar"}
         </span>
       </div>
- 
+
       {open && (
         <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
           {["peques", "grandes"].map((g) => (
@@ -1799,7 +1898,7 @@ function ManualAssignRow({ date, day, volunteers, addToAssignment, removeFromAss
               ))}
             </div>
           ))}
- 
+
           <div style={{ gridColumn: "1 / -1", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 6 }}>
             <select
               className="rk-input"
@@ -1831,9 +1930,9 @@ function ManualAssignRow({ date, day, volunteers, addToAssignment, removeFromAss
     </div>
   );
 }
- 
+
 /* ---------- admin: tarjeta de un evento especial ---------- */
- 
+
 function EventAdminCard({ event, volunteers, updateEvent, deleteEvent, addToEventTeam, removeFromEventTeam }) {
   const [open, setOpen] = useState(false);
   const [titleDraft, setTitleDraft] = useState(event.title);
@@ -1842,23 +1941,23 @@ function EventAdminCard({ event, volunteers, updateEvent, deleteEvent, addToEven
   const [saved, setSaved] = useState(false);
   const [addVolunteerId, setAddVolunteerId] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
- 
+
   const assignedIds = new Set(event.team.map((p) => p.id));
   const availableToAdd = volunteers.filter((v) => !assignedIds.has(v.id));
   const interested = volunteers.filter((v) => (v.eventInterest || []).includes(event.id));
- 
+
   async function handleSave() {
     await updateEvent(event.id, { title: titleDraft, instructions: instrDraft, files: filesDraft });
     setSaved(true);
     setTimeout(() => setSaved(false), 2200);
   }
- 
+
   function handleAdd() {
     if (!addVolunteerId) return;
     addToEventTeam(event.id, addVolunteerId);
     setAddVolunteerId("");
   }
- 
+
   return (
     <div style={{ marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid var(--paper-warm)" }}>
       <div
@@ -1872,7 +1971,7 @@ function EventAdminCard({ event, volunteers, updateEvent, deleteEvent, addToEven
           {event.team.length} en el equipo · {open ? "cerrar" : "editar"}
         </span>
       </div>
- 
+
       {open && (
         <div style={{ marginTop: 12 }}>
           <span className="rk-label">Título del evento</span>
@@ -1890,7 +1989,7 @@ function EventAdminCard({ event, volunteers, updateEvent, deleteEvent, addToEven
             onChange={(e) => setInstrDraft(e.target.value)}
             style={{ marginBottom: 10, resize: "vertical" }}
           />
- 
+
           <span className="rk-label">Archivos</span>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 }}>
             {FILES_SCHEMA.map(({ key: fkey, label }) => (
@@ -1903,7 +2002,7 @@ function EventAdminCard({ event, volunteers, updateEvent, deleteEvent, addToEven
               />
             ))}
           </div>
- 
+
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
             {saved && (
               <span style={{ fontSize: 12.5, color: "var(--leaf)", display: "flex", alignItems: "center", gap: 4 }}>
@@ -1914,7 +2013,7 @@ function EventAdminCard({ event, volunteers, updateEvent, deleteEvent, addToEven
               Guardar cambios
             </button>
           </div>
- 
+
           <span className="rk-label">Equipo del evento</span>
           {event.team.length === 0 && (
             <p style={{ fontSize: 12.5, color: "var(--soil-light)" }}>Nadie asignado todavía.</p>
@@ -1955,7 +2054,7 @@ function EventAdminCard({ event, volunteers, updateEvent, deleteEvent, addToEven
               ⭐ Marcaron interés: {interested.map((v) => v.name).join(", ")}
             </p>
           )}
- 
+
           <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--paper-warm)" }}>
             {confirmDelete ? (
               <div style={{ fontSize: 13 }}>
@@ -1980,7 +2079,7 @@ function EventAdminCard({ event, volunteers, updateEvent, deleteEvent, addToEven
     </div>
   );
 }
- 
+
 function MaterialDayEditor({ date, materialsDraft, updateMaterialField, saveMaterialsForDate, saved }) {
   return (
     <div style={{ marginBottom: 18, paddingBottom: 14, borderBottom: "1px solid var(--paper-warm)" }}>
@@ -2036,4 +2135,3 @@ function MaterialDayEditor({ date, materialsDraft, updateMaterialField, saveMate
     </div>
   );
 }
- 
